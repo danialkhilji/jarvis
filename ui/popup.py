@@ -2,14 +2,73 @@ import math
 import threading
 import queue
 import tkinter as tk
-from pathlib import Path
 import customtkinter as ctk
-from PIL import Image, ImageTk
 import config
+from PIL import Image, ImageTk
+
+
+class ToolSummaryWidget(tk.Frame):
+    """Collapsible tool-call summary embedded inline in the chat."""
+
+    def __init__(self, parent, bg, tools):
+        super().__init__(parent, bg=bg)
+        self._bg = bg
+        self._tools = tools  # list of (name, status)
+        self._expanded = False
+
+        # ── Collapsed header ────────────────────────────────────────
+        header = tk.Frame(self, bg=bg, cursor="hand2")
+        header.pack(anchor="w")
+
+        self._toggle_lbl = tk.Label(
+            header, text="▶", bg=bg, fg="#4cc9f0",
+            font=("SF Pro Text", 10), cursor="hand2",
+        )
+        self._toggle_lbl.pack(side="left", padx=(0, 4))
+
+        n = len(tools)
+        names = "  ·  ".join(name for name, _ in tools[:3])
+        if n > 3:
+            names += f"  +{n - 3}"
+        summary = f"{names}  ({n} tool{'s' if n != 1 else ''})"
+
+        self._summary_lbl = tk.Label(
+            header, text=summary, bg=bg, fg="#6a6a7a",
+            font=("SF Pro Text", 11), cursor="hand2",
+        )
+        self._summary_lbl.pack(side="left")
+
+        for w in (header, self._toggle_lbl, self._summary_lbl):
+            w.bind("<Button-1>", self._toggle)
+
+        # ── Expanded detail ─────────────────────────────────────────
+        self._detail = tk.Frame(self, bg=bg)
+
+    def _toggle(self, event=None):
+        self._expanded = not self._expanded
+        self._toggle_lbl.configure(text="▼" if self._expanded else "▶")
+        if self._expanded:
+            for w in self._detail.winfo_children():
+                w.destroy()
+            for i, (name, status) in enumerate(self._tools, 1):
+                color = (
+                    "#4ecca3" if status == "completed"
+                    else "#e94560" if status == "error"
+                    else "#6a6a7a"
+                )
+                icon = "✓" if status == "completed" else "✗" if status == "error" else "·"
+                tk.Label(
+                    self._detail, text=f"  {i}. {icon}  {name}",
+                    bg=self._bg, fg=color, font=("SF Pro Text", 10),
+                ).pack(anchor="w")
+            self._detail.pack(anchor="w")
+        else:
+            self._detail.pack_forget()
 
 
 class ChatPopup(ctk.CTkToplevel):
     BG = "#2a2a2a"
+    _SLIDE_OFFSET = 30  # px — popup slides in from this offset below its target y
 
     def __init__(self, parent, agent, app=None):
         super().__init__(parent)
@@ -51,11 +110,15 @@ class ChatPopup(ctk.CTkToplevel):
         )
         self.chat_display.pack(fill="both", expand=True, padx=12, pady=(0, 0))
 
-        self.chat_display._textbox.tag_configure("user_label", foreground="#4ecca3", font=("SF Pro Display", 13, "bold"))
-        self.chat_display._textbox.tag_configure("assistant_label", foreground="#4cc9f0", font=("SF Pro Display", 13, "bold"))
-        self.chat_display._textbox.tag_configure("error", foreground="#e94560")
-        self.chat_display._textbox.tag_configure("dim", foreground="#6a6a7a")
-        self.chat_display._textbox.tag_configure("bold", font=("SF Pro Text", 13, "bold"))
+        tb = self.chat_display._textbox
+        tb.tag_configure("user_label",      foreground="#4ecca3", font=("SF Pro Display", 13, "bold"))
+        tb.tag_configure("assistant_label", foreground="#4cc9f0", font=("SF Pro Display", 13, "bold"))
+        tb.tag_configure("error",           foreground="#e94560")
+        tb.tag_configure("dim",             foreground="#6a6a7a")
+        tb.tag_configure("bold",            font=("SF Pro Text", 13, "bold"))
+        tb.tag_configure("table_head",      font=("Menlo", 11, "bold"), foreground="#4cc9f0")
+        tb.tag_configure("table_sep",       font=("Menlo", 11), foreground="#2a5a6a")
+        tb.tag_configure("table_row",       font=("Menlo", 11), foreground="#c0d0d8")
 
         # Input bar
         input_frame = ctk.CTkFrame(outer, fg_color="transparent")
@@ -71,6 +134,7 @@ class ChatPopup(ctk.CTkToplevel):
         self.input_field.bind("<Shift-Return>", lambda e: None)
         self.input_field.bind("<KeyRelease>", self._auto_resize_input)
         self._input_max_height = 120
+        self._input_current_height = 38
 
         self.send_btn = ctk.CTkButton(
             input_frame, text=">", width=45, height=38,
@@ -89,13 +153,17 @@ class ChatPopup(ctk.CTkToplevel):
         return "break"
 
     def _auto_resize_input(self, event=None):
+        self.after(0, self._do_resize_input)
+
+    def _do_resize_input(self):
         widget = self.input_field._textbox
-        widget.update_idletasks()
         count = widget.count("1.0", "end", "displaylines")
-        display_lines = max(1, count[0] if count else 1)
-        new_height = min(38 + (display_lines - 1) * 20, self._input_max_height)
-        self.input_field.configure(height=new_height)
-        widget.see("insert")
+        lines = max(1, count[0] if count else 1)
+        new_height = min(38 + (lines - 1) * 20, self._input_max_height)
+        if new_height != self._input_current_height:
+            self._input_current_height = new_height
+            self.input_field.configure(height=new_height)
+            self.chat_display.see("end")
 
     def show(self, x, y, animate=True):
         self.geometry(f"{config.WINDOW_WIDTH}x{config.WINDOW_HEIGHT}+{x}+{y}")
@@ -109,9 +177,8 @@ class ChatPopup(ctk.CTkToplevel):
         self._target_y = y
         self._anim_step = 0
         self._anim_total = 12
-        slide_offset = 30
         self.attributes("-alpha", 0.0)
-        self.geometry(f"{config.WINDOW_WIDTH}x{config.WINDOW_HEIGHT}+{x}+{y + slide_offset}")
+        self.geometry(f"{config.WINDOW_WIDTH}x{config.WINDOW_HEIGHT}+{x}+{y + self._SLIDE_OFFSET}")
         self._animate_show()
 
     def _run_border_trace(self):
@@ -173,9 +240,8 @@ class ChatPopup(ctk.CTkToplevel):
         self._anim_step += 1
         t = self._anim_step / self._anim_total
         t = 1 - (1 - t) ** 3  # ease-out cubic
-        slide_offset = 30
-        cur_y = int(self._target_y + slide_offset * (1 - t))
-        alpha = min(t / 0.88 * 0.88, 0.88)
+        cur_y = int(self._target_y + self._SLIDE_OFFSET * (1 - t))
+        alpha = min(t, 0.88)
         self.attributes("-alpha", alpha)
         self.geometry(f"+{self._target_x}+{cur_y}")
         if self._anim_step < self._anim_total:
@@ -214,6 +280,7 @@ class ChatPopup(ctk.CTkToplevel):
 
         self.input_field.delete("1.0", "end")
         self.input_field.configure(height=38)
+        self._input_current_height = 38
         self._append_text("You", message + "\n", "user_label")
 
         self.is_generating = True
@@ -225,9 +292,11 @@ class ChatPopup(ctk.CTkToplevel):
     def _generate_response(self, message):
         self.update_queue.put(("start", None))
         try:
-            def on_chunk(text):
-                self.update_queue.put(("chunk", text))
-            self.agent.chat_stream(message, on_chunk=on_chunk)
+            self.agent.chat_stream(
+                message,
+                on_chunk=lambda t: self.update_queue.put(("chunk", t)),
+                on_tool_call=lambda n, s: self.update_queue.put(("tool", (n, s))),
+            )
             self.update_queue.put(("end", None))
         except Exception as e:
             self.update_queue.put(("error", str(e)))
@@ -284,6 +353,16 @@ class ChatPopup(ctk.CTkToplevel):
         self._spinner = None
         self.chat_display.configure(state="disabled")
 
+    def _insert_tool_summary(self, tools):
+        self.chat_display.configure(state="normal")
+        tb = self.chat_display._textbox
+        tb.insert("end", "\n")
+        widget = ToolSummaryWidget(tb, self.BG, tools)
+        tb.window_create("end", window=widget, padx=4, pady=3)
+        tb.insert("end", "\n")
+        self.chat_display.configure(state="disabled")
+        self.chat_display.see("end")
+
     # ── Markdown rendering ─────────────────────────────────────────
 
     def _render_markdown(self):
@@ -311,7 +390,54 @@ class ChatPopup(ctk.CTkToplevel):
                 tb.delete(pos, f"{pos}+2c")
                 tb.insert(pos, "• ")
 
+        self._render_tables(tb)
         self.chat_display.configure(state="disabled")
+
+    def _render_tables(self, tb):
+        start_line = int(tb.index("response_start").split('.')[0])
+        end_line   = int(tb.index("end").split('.')[0])
+        i = start_line
+        while i <= end_line:
+            if tb.get(f"{i}.0", f"{i}.end").strip().startswith('|'):
+                j = i
+                while j <= end_line and tb.get(f"{j}.0", f"{j}.end").strip().startswith('|'):
+                    j += 1
+                raw = [tb.get(f"{k}.0", f"{k}.end") for k in range(i, j)]
+                rows, headers = self._parse_md_table(raw)
+                if rows:
+                    formatted = self._format_md_table(rows, headers)
+                    for k, (text, tag) in zip(range(i, j), formatted):
+                        tb.delete(f"{k}.0", f"{k}.end")
+                        tb.insert(f"{k}.0", text, tag)
+                i = j
+            else:
+                i += 1
+
+    def _parse_md_table(self, raw_lines):
+        rows, headers = [], []
+        for line in raw_lines:
+            cells = [c.strip() for c in line.strip().strip('|').split('|')]
+            if all(set(c) <= set('-: ') for c in cells):
+                if rows:
+                    headers[-1] = True
+                continue
+            rows.append(cells)
+            headers.append(False)
+        return rows, headers
+
+    def _format_md_table(self, rows, headers):
+        num_cols = max(len(r) for r in rows)
+        rows = [r + [''] * (num_cols - len(r)) for r in rows]
+        widths = [max(len(r[i]) for r in rows) for i in range(num_cols)]
+        result = []
+        for row, is_hdr in zip(rows, headers):
+            cells = [row[i].ljust(widths[i]) for i in range(num_cols)]
+            line = '  ' + ' │ '.join(cells)
+            result.append((line, "table_head" if is_hdr else "table_row"))
+            if is_hdr:
+                sep = '──' + '─┼─'.join('─' * w for w in widths)
+                result.append((sep, "table_sep"))
+        return result
 
     # ── Queue processing ──────────────────────────────────────────
 
@@ -320,6 +446,8 @@ class ChatPopup(ctk.CTkToplevel):
             while True:
                 msg_type, data = self.update_queue.get_nowait()
                 if msg_type == "start":
+                    self._pending_tools = []
+                    self._tool_summary_inserted = False
                     self._append_label("Jarvis", "assistant_label")
                     self.chat_display.configure(state="normal")
                     self.chat_display._textbox.mark_set("response_start", "end-1c")
@@ -328,8 +456,19 @@ class ChatPopup(ctk.CTkToplevel):
                     self._show_loading()
                     if self.app:
                         self.app.set_anim_state("thinking")
+                elif msg_type == "tool":
+                    tool_name, status = data
+                    for i, (n, s) in enumerate(self._pending_tools):
+                        if n == tool_name and s == "started":
+                            self._pending_tools[i] = (tool_name, status)
+                            break
+                    else:
+                        self._pending_tools.append((tool_name, status))
                 elif msg_type == "chunk":
                     self._hide_loading()
+                    if self._pending_tools and not self._tool_summary_inserted:
+                        self._tool_summary_inserted = True
+                        self._insert_tool_summary(list(self._pending_tools))
                     self._append_raw(data)
                 elif msg_type == "end":
                     self._hide_loading()
@@ -442,26 +581,34 @@ class JarvisApp(tk.Tk):
         self.geometry(f"{icon_sz}x{icon_sz}+{x}+{y}")
 
     def _create_icon_canvas(self):
-        icon_path = Path(__file__).parent.parent / "assets" / "icon.png"
         icon_sz = config.ICON_SIZE
-        img_sz = icon_sz - 40  # leave 20px each side for the two rings
-        img = Image.open(icon_path)
-        bbox = img.getbbox()
-        if bbox:
-            img = img.crop(bbox)
-        img = img.resize((img_sz, img_sz), Image.LANCZOS)
-        self.icon_photo = ImageTk.PhotoImage(img)
-
         self.icon_canvas = tk.Canvas(
             self, width=icon_sz, height=icon_sz,
             bg="systemTransparent", highlightthickness=0, bd=0, cursor="hand2",
         )
         self.icon_canvas.place(x=0, y=0)
-        self.icon_canvas.create_image(icon_sz // 2, icon_sz // 2,
-                                      image=self.icon_photo, anchor="center", tags="icon")
+        self._draw_face_icon()
         self.icon_canvas.bind("<Button-1>", self._on_press)
         self.icon_canvas.bind("<B1-Motion>", self._on_drag)
         self.icon_canvas.bind("<ButtonRelease-1>", self._on_release)
+
+    def _draw_face_icon(self):
+        c = self.icon_canvas
+        c.delete("icon")
+        cx = cy = config.ICON_SIZE // 2
+
+        icon_path = config.BASE_DIR / "assets" / "icon.png"
+        # Fit inside inner ring (r=30, width=3) → usable diameter ≈ 54 px
+        img_sz = 54
+        try:
+            img = Image.open(icon_path).convert("RGBA")
+            img = img.resize((img_sz, img_sz), Image.LANCZOS)
+            self._icon_photo = ImageTk.PhotoImage(img)
+            c.create_image(cx, cy, image=self._icon_photo, anchor="center", tags="icon")
+        except Exception as e:
+            print(f"[icon] Could not load icon.png: {e}")
+            c.create_text(cx, cy, text="J", fill="#4cc9f0",
+                          font=("SF Pro Display", 28, "bold"), tags="icon")
 
     # ── Animation ─────────────────────────────────────────────────
 

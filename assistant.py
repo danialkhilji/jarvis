@@ -1,6 +1,10 @@
+import asyncio
+import threading
+
 from agno.agent import Agent
 from agno.models.groq import Groq
 from agno.db.sqlite import SqliteDb
+from agno.run.agent import RunEvent
 import config
 from tools import file_ops
 from tools.web_search import web_search
@@ -12,8 +16,15 @@ class AgnoAssistant:
         file_ops.write_confirm_callback = write_confirm_callback
 
         db = SqliteDb(db_file=str(config.DATA_DIR / "agent.db"))
-
         skills = load_skills()
+
+        all_tools = [
+            file_ops.read_file,
+            file_ops.write_file,
+            file_ops.list_directory,
+            file_ops.search_files,
+            web_search,
+        ] + skills
 
         self.agent = Agent(
             model=Groq(
@@ -22,34 +33,44 @@ class AgnoAssistant:
                 retry_with_guidance_limit=3,
             ),
             db=db,
-            tools=[
-                file_ops.read_file,
-                file_ops.write_file,
-                file_ops.list_directory,
-                file_ops.search_files,
-                web_search,
-            ] + skills,
-            update_memory_on_run=True,
+            tools=all_tools,
+            stream_events=True,
+            add_history_to_context=True,
+            num_history_runs=10,
             instructions=[
-                "You are Jarvis, a helpful personal AI assistant running as a desktop popup app.",
-                "Be concise and direct — the user is interacting via a small window.",
-                f"The user's home directory is: {config.HOME_DIR}",
-                f"You can access these directories: {', '.join(config.ALLOWED_DIRECTORIES)}",
-                f"IMPORTANT: Always use FULL ABSOLUTE paths starting with {config.HOME_DIR}. Never use ~ or placeholder usernames.",
-                "When the user asks you to remember something, confirm that you'll remember it.",
-                "When creating files, always use absolute paths from the allowed directories listed above.",
-                "Use the web_search tool for any question about current events, news, prices, or anything that needs up-to-date information.",
-                "For weather questions, use the get_weather tool with the city name. If the user doesn't specify a city, ask them which city they want weather for.",
+                "You are JARVIS, a professional personal AI assistant inspired by Iron Man's J.A.R.V.I.S.",
+                "Behavior: Address the user as 'Sir' when natural. Be concise, intelligent, calm, and proactive. Prefer action over lengthy explanations. Provide clear status updates when performing tasks. Only suggest next steps if genuinely necessary — do not pad responses. Avoid emojis, slang, and unnecessary verbosity.",
+                f"Environment: Running as a desktop popup assistant. User home directory: {config.HOME_DIR}. Allowed directories: {', '.join(config.ALLOWED_DIRECTORIES)}.",
+                f"Rules: Always use full absolute paths starting with {config.HOME_DIR}. Never use ~, relative paths, or placeholder usernames. When creating or modifying files, provide the absolute path. If the user asks you to remember something, respond: 'Understood, Sir. I'll remember that.' Use the web_search tool whenever current or time-sensitive information is required.",
+                "Examples of tone: 'Certainly, Sir.' / 'Right away, Sir.' / 'Done, Sir.' / 'I've encountered an issue, Sir: [details]'",
             ],
             markdown=True,
         )
 
-    def chat_stream(self, message, on_chunk=None):
+        # Persistent async event loop in a daemon thread (Tkinter mainloop is synchronous)
+        self._loop = asyncio.new_event_loop()
+        threading.Thread(target=self._loop.run_forever, daemon=True, name="jarvis-async").start()
+
+    def chat_stream(self, message, on_chunk=None, on_tool_call=None):
+        future = asyncio.run_coroutine_threadsafe(
+            self._async_chat(message, on_chunk, on_tool_call), self._loop
+        )
+        return future.result()
+
+    async def _async_chat(self, message, on_chunk=None, on_tool_call=None):
         full_text = ""
         try:
-            response = self.agent.run(message, stream=True)
-            for event in response:
-                if event.content:
+            async for event in self.agent.arun(message, stream=True):
+                if event.event == RunEvent.tool_call_started.value:
+                    if event.tool and on_tool_call:
+                        on_tool_call(event.tool.tool_name, "started")
+                elif event.event == RunEvent.tool_call_completed.value:
+                    if event.tool and on_tool_call:
+                        on_tool_call(event.tool.tool_name, "completed")
+                elif event.event == RunEvent.tool_call_error.value:
+                    if event.tool and on_tool_call:
+                        on_tool_call(event.tool.tool_name, "error")
+                elif event.event == RunEvent.run_content.value and event.content:
                     full_text += event.content
                     if on_chunk:
                         on_chunk(event.content)

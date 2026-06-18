@@ -1,5 +1,4 @@
 import importlib
-import functools
 from pathlib import Path
 
 
@@ -26,14 +25,9 @@ def load_skills():
             print(f"  [skills] Skipping {path.name}: missing SKILL_NAME, SKILL_DESCRIPTION, or run()")
             continue
 
-        @functools.wraps(run_fn)
-        def wrapper(*args, _fn=run_fn, **kwargs):
-            return _fn(*args, **kwargs)
-
-        wrapper.__name__ = name
-        wrapper.__doc__ = desc
-
-        loaded.append(wrapper)
+        run_fn.__name__ = name
+        run_fn.__doc__ = f"{desc}\n\n{run_fn.__doc__ or ''}".strip()
+        loaded.append(run_fn)
         print(f"  Loaded skill: {name}")
 
     return loaded

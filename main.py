@@ -73,7 +73,7 @@ def main():
     assistant = AgnoAssistant(write_confirm_callback=write_confirm)
     app = JarvisApp(assistant)
 
-    print("Jarvis is running (powered by Agno + Groq).")
+    print("Jarvis is running...")
     app.mainloop()
 
 
